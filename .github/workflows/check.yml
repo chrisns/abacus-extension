@@ -1,0 +1,16 @@
+name: Check userscript
+
+on:
+  push:
+    branches: [main]
+    paths: ["abacus-mental-math-helper.user.js"]
+  pull_request:
+    paths: ["abacus-mental-math-helper.user.js"]
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node --check abacus-mental-math-helper.user.js
