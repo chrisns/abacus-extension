@@ -89,7 +89,7 @@ function handleEnterKeydown(e) {
   if (e.key !== 'Enter') return;
   const input = e.target;
   if (!input.classList || !input.classList.contains('answer-field')) return;
-  if (!settings.limitWrongAnswers || input.disabled) return;
+  if (!settings.limitWrongAnswers) return;
 
   const correct = getCorrectAnswer();
   if (correct === null) return; // can't validate this question type - let the site handle it
@@ -98,18 +98,19 @@ function handleEnterKeydown(e) {
   const isCorrect = !Number.isNaN(typed) && roundTo3(typed) === correct;
   if (isCorrect) return;
 
+  // Their first two wrong answers in this unit go through as normal - only
+  // once that count is exceeded do we start blocking a wrong submission.
+  // Never disables the input: they can always keep trying.
+  if (unitWrongAttempts < 2) {
+    unitWrongAttempts += 1;
+    return;
+  }
+
   blockCurrentEnter = true;
   e.preventDefault();
   e.stopImmediatePropagation();
-
-  unitWrongAttempts += 1;
-  if (unitWrongAttempts > 2) {
-    input.disabled = true;
-    input.blur();
-  } else {
-    input.value = '';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  }
+  input.value = '';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 function handleEnterKeyupOrPress(e) {
@@ -137,6 +138,7 @@ function trackListeningHeading() {
 // answered correctly and the site reveals "Next question" with something
 // typed, leave it alone.
 function applyListenAgainButton() {
+  if (!currentUnitIsListening) return;
   const input = document.querySelector('input.answer-field');
   if (!input) return;
   const buttons = Array.from(document.querySelectorAll('.exercise-card button'));
