@@ -25,6 +25,7 @@ function onUnitPathChange() {
   lastUnitPath = path;
   currentUnitIsListening = false;
   unitWrongAttempts = 0;
+  refreshUnitsToday();
 }
 
 // Remembers which unit-number button was last clicked on the topic list, so
@@ -253,6 +254,65 @@ async function restartCurrentUnit() {
   if (startModalBtn) startModalBtn.click();
 }
 
+// Replaces the language selector in the navbar with a count of units
+// finished today, read from the same API the site's own profile page uses.
+let unitsToday = null;
+
+function localDateStr(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+async function refreshUnitsToday() {
+  const appEl = document.getElementById('app');
+  const vm = appEl && appEl.__vue__;
+  const token = vm && vm.$store && vm.$store.state.account && vm.$store.state.account.access_token;
+  if (!token) return;
+  try {
+    const res = await fetch('https://api.abacusmentalmath.com/profile/units-finished/week/0', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return;
+    const json = await res.json();
+    const today = localDateStr();
+    const entry = (json.data || []).find((d) => d.day === today);
+    unitsToday = entry ? entry.amount : 0;
+    applyUnitsTodayDisplay();
+  } catch (e) {
+    // offline, or the API shape changed - leave whatever was last shown
+  }
+}
+
+// The language toggle's BootstrapVue-generated id isn't stable across
+// renders, so find it by the locale-code text on its toggle span instead.
+function findLanguageToggleWrapper() {
+  const span = Array.from(document.querySelectorAll('span[title]')).find(
+    (s) => /^[a-z]{2}-[A-Z]{2}$/.test(s.getAttribute('title')) && s.closest('[role="button"]'),
+  );
+  return span ? span.closest('.b-dropdown') : null;
+}
+
+function applyUnitsTodayDisplay() {
+  // Re-hide every pass, in case Vue ever re-creates the dropdown fresh -
+  // guarded so this is a no-op once it's already hidden.
+  const wrapper = findLanguageToggleWrapper();
+  if (wrapper && wrapper.style.display !== 'none') wrapper.style.display = 'none';
+
+  let display = document.getElementById('abacus-ext-units-today');
+  if (!display) {
+    if (!wrapper) return; // wait until the toggle exists so we can anchor next to it
+    display = document.createElement('span');
+    display.id = 'abacus-ext-units-today';
+    display.style.cssText = 'font-family:poppins,sans-serif;font-weight:500;padding:0 0.75rem;white-space:nowrap;';
+    wrapper.insertAdjacentElement('afterend', display);
+  }
+
+  const text = unitsToday === null ? '' : `Units today: ${unitsToday}`;
+  if (display.textContent !== text) display.textContent = text;
+}
+
 function applyPlayAgainButton() {
   if (document.getElementById('abacus-ext-play-again')) return;
   if (!settings.playAgainButton || !currentUnitIsListening) return;
@@ -277,11 +337,13 @@ function applyAll() {
   applyListenAgainButton();
   applyPlayAgainButton();
   applySpeedMemory();
+  applyUnitsTodayDisplay();
 }
 
 chrome.storage.sync.get(DEFAULTS, (stored) => {
   settings = { ...DEFAULTS, ...stored };
   applyAll();
+  refreshUnitsToday();
 });
 
 chrome.storage.onChanged.addListener((changes) => {
