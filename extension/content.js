@@ -1,6 +1,6 @@
-// ponytail: one MutationObserver drives DOM-shape features; the wrong-answer
-// check hooks the keyboard directly since it must run before the site's own
-// submit handler, not after the DOM has already changed.
+// ponytail: everything runs off one MutationObserver plus the input event
+// it's already wired to, including the wrong-answer colour hint - no need
+// to intercept the submit itself, just show red/green before they press Enter.
 
 const DEFAULTS = {
   hideTimer: true,
@@ -17,14 +17,12 @@ let settings = { ...DEFAULTS };
 // heading and component; Reading Abacus does not use it.
 let currentUnitIsListening = false;
 let lastUnitPath = null;
-let unitWrongAttempts = 0;
 
 function onUnitPathChange() {
   const path = location.pathname;
   if (path === lastUnitPath) return;
   lastUnitPath = path;
   currentUnitIsListening = false;
-  unitWrongAttempts = 0;
   refreshUnitsToday();
 }
 
@@ -79,50 +77,32 @@ function roundTo3(n) {
   return Math.round(n * 1000) / 1000;
 }
 
-// Set by handleEnterKeydown for the current Enter press, then consulted by
-// the keyup listener so a wrong answer is blocked on whichever of the two
-// events the site actually listens to - without double-counting the attempt.
-let blockCurrentEnter = false;
-
-function handleEnterKeydown(e) {
-  blockCurrentEnter = false;
-  if (e.key !== 'Enter') return;
-  const input = e.target;
-  if (!input.classList || !input.classList.contains('answer-field')) return;
-  if (!settings.limitWrongAnswers) return;
-
-  const correct = getCorrectAnswer();
-  if (correct === null) return; // can't validate this question type - let the site handle it
-
-  const typed = Number(input.value);
-  const isCorrect = !Number.isNaN(typed) && roundTo3(typed) === correct;
-  if (isCorrect) return;
-
-  // Their first two wrong answers in this unit go through as normal - only
-  // once that count is exceeded do we start blocking a wrong submission.
-  // Never disables the input: they can always keep trying.
-  if (unitWrongAttempts < 2) {
-    unitWrongAttempts += 1;
+// After 2 wrong answers in a unit, colour what they're typing red/green
+// against the correct answer, live, so they see it before they submit.
+// No interception of the submit itself - the site's own handling still
+// decides what happens when they press Enter.
+function applyWrongAnswerHint() {
+  const input = document.querySelector('input.answer-field');
+  if (!input) return;
+  if (!settings.limitWrongAnswers) {
+    if (input.style.color) input.style.color = '';
     return;
   }
 
-  blockCurrentEnter = true;
-  e.preventDefault();
-  e.stopImmediatePropagation();
-  input.value = '';
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-}
+  // The pager pre-colours not-yet-reached questions using last attempt's
+  // result, so only questions before the current one reflect this attempt.
+  const pagerButtons = Array.from(document.querySelectorAll('.pager-button'));
+  const activeIndex = pagerButtons.findIndex((b) => b.classList.contains('active'));
+  const answered = activeIndex === -1 ? pagerButtons : pagerButtons.slice(0, activeIndex);
+  const wrongCount = answered.filter((b) => b.classList.contains('wrong')).length;
 
-function handleEnterKeyupOrPress(e) {
-  if (e.key !== 'Enter' || !blockCurrentEnter) return;
-  e.preventDefault();
-  e.stopImmediatePropagation();
-  if (e.type === 'keyup') blockCurrentEnter = false;
+  const correct = getCorrectAnswer();
+  const typed = Number(input.value);
+  const isCorrect = !Number.isNaN(typed) && roundTo3(typed) === correct;
+  const shouldHint = wrongCount >= 2 && correct !== null && input.value.trim() !== '';
+  const color = shouldHint ? (isCorrect ? 'green' : 'red') : '';
+  if (input.style.color !== color) input.style.color = color;
 }
-
-document.addEventListener('keydown', handleEnterKeydown, true);
-document.addEventListener('keypress', handleEnterKeyupOrPress, true);
-document.addEventListener('keyup', handleEnterKeyupOrPress, true);
 
 function trackListeningHeading() {
   const heading = document.querySelector('.exercise-card h2, .exercise-card h5');
@@ -337,6 +317,7 @@ function applyAll() {
   applyTimerVisibility();
   trackListeningHeading();
   applyListenAgainButton();
+  applyWrongAnswerHint();
   applyPlayAgainButton();
   applySpeedMemory();
   applyUnitsTodayDisplay();
