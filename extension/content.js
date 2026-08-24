@@ -2,7 +2,13 @@
 // check hooks the keyboard directly since it must run before the site's own
 // submit handler, not after the DOM has already changed.
 
-const DEFAULTS = { hideTimer: true, limitWrongAnswers: true, playAgainButton: true };
+const DEFAULTS = {
+  hideTimer: true,
+  limitWrongAnswers: true,
+  playAgainButton: true,
+  voiceSpeed: null,
+  timeoutSpeed: null,
+};
 let settings = { ...DEFAULTS };
 
 // Latched per-unit: set true whenever the "Listen and Answer" heading is seen
@@ -164,6 +170,59 @@ function findButtonByText(root, text) {
   return Array.from(root.querySelectorAll('button')).find((b) => b.textContent.trim() === text);
 }
 
+// Remembers the two speed sliders in the Start dialog (voice speed, timeout
+// speed) across page loads. The site itself keeps them for the rest of the
+// current tab session but forgets them on the next visit.
+const rangeValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+let speedDialogHandled = false;
+
+function getSpeedSliders() {
+  const sliders = Array.from(document.querySelectorAll('input[type="range"]'));
+  return sliders.length >= 2 ? [sliders[0], sliders[1]] : null;
+}
+
+function setSliderValue(slider, value) {
+  if (!value || slider.value === value) return;
+  rangeValueSetter.call(slider, value);
+  slider.dispatchEvent(new Event('input', { bubbles: true }));
+  slider.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+// Vue may still be applying its own fetched defaults right as the dialog
+// opens, which would clobber a value set too early - so re-apply a couple
+// of times over the first half second rather than trusting a single pass.
+async function applySpeedMemory() {
+  if (!getSpeedSliders()) {
+    speedDialogHandled = false;
+    return;
+  }
+  if (speedDialogHandled) return;
+  speedDialogHandled = true;
+
+  for (const delay of [0, 200, 400]) {
+    if (delay) await new Promise((r) => setTimeout(r, delay));
+    const sliders = getSpeedSliders();
+    if (!sliders) return;
+    setSliderValue(sliders[0], settings.voiceSpeed);
+    setSliderValue(sliders[1], settings.timeoutSpeed);
+  }
+}
+
+// The DOM value stays in sync with Vue's state either way (dragging or the
+// +/- buttons), so reading it at the moment START is pressed is enough -
+// no need to reach into the Vue component for it.
+document.addEventListener(
+  'click',
+  (e) => {
+    const btn = e.target.closest('button');
+    if (!btn || btn.textContent.trim() !== 'START') return;
+    const sliders = getSpeedSliders();
+    if (!sliders) return;
+    chrome.storage.sync.set({ voiceSpeed: sliders[0].value, timeoutSpeed: sliders[1].value });
+  },
+  true,
+);
+
 async function restartCurrentUnit() {
   if (!lastChosenUnit) {
     location.reload();
@@ -217,6 +276,7 @@ function applyAll() {
   trackListeningHeading();
   applyListenAgainButton();
   applyPlayAgainButton();
+  applySpeedMemory();
 }
 
 chrome.storage.sync.get(DEFAULTS, (stored) => {
