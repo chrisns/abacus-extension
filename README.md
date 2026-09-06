@@ -3,13 +3,15 @@
 A Tampermonkey userscript for `client.abacusmentalmath.com`. Once installed it runs on every page automatically:
 
 - **Hides the timer** — during a unit and on the end-of-unit summary.
-- **Colours the answer red or green** — after 2 wrong answers in a unit, the text they're typing turns red or green against the correct answer, live, before they press Enter. The site's own submit handling is untouched.
+- **Takes a "wrong answers allowed" target** — a box in the navbar next to the logo, remembered between visits, so they can shoot for 2, 1 or 0 wrong answers in a unit. The hints below start once that many have gone wrong.
+- **Colours the answer amber, red or green** — once the allowance is used up, the text they're typing is checked against the correct answer, live, before they press Enter: green when it's right, amber when it's wrong, and red for every wrong answer past the allowance. With the allowance at 2 that's the original behaviour; at 0 the hints are on from the first question.
+- **Makes a wrong answer take two Enters** — while those hints are live, the first Enter on a wrong answer is swallowed and the field shakes, so a hurried press doesn't spend the attempt before they've looked at the colour. A correct answer still submits on the first press, as does anything the script can't check.
 - **Always offers a "Listen again" button** — on Listening Abacus and Listening Anzan units, so a child who didn't hear the numbers can replay them at any point, not just before answering.
 - **Remembers the voice/timeout speed** — the two sliders in the Start dialog keep the last values used, on every future unit and every future visit.
 - **Adds a "Play again" button** — on the end-of-unit screen for Listening Abacus and Listening Anzan, to restart the same unit in one click.
-- **Shows units completed today** — in place of the language dropdown at the top of every page.
+- **Shows units completed today** — in place of the language dropdown at the top of every page, refreshed as soon as a unit finishes and once a minute after that.
 
-Each of the first three is a checkbox in the extension's toolbar popup in the old Chrome-extension version of this project; here they're Tampermonkey menu commands (see below).
+Hiding the timer, the answer hints (the colour and the double Enter together, allowance box included), and the play-again button are each a checkbox in the extension's toolbar popup in the old Chrome-extension version of this project; here they're Tampermonkey menu commands (see below).
 
 ## Install
 
@@ -24,7 +26,7 @@ That's it — the script now runs automatically on `client.abacusmentalmath.com`
 Click the Tampermonkey icon in the toolbar while on the site. The script's menu commands are listed there:
 
 - ✅/⬜ Hide the timer
-- ✅/⬜ Colour the answer red/green after 2 wrong
+- ✅/⬜ Answer hints: colour and double Enter
 - ✅/⬜ Add a play-again button
 
 Clicking one flips it and reloads the page.
