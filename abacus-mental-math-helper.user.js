@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Abacus Mental Math Helper
 // @namespace    https://github.com/chrisns/abacus-extension
-// @version      1.6.0
-// @description  Hide the timer, colour wrong answers, remember speed settings, add a play-again button, and show units done today, on client.abacusmentalmath.com
+// @version      1.7.0
+// @description  Hide the timer, colour and double-check wrong answers, remember speed settings, add a play-again button, and show units done today, on client.abacusmentalmath.com
 // @author       Chris Nesbitt-Smith
 // @match        https://client.abacusmentalmath.com/*
 // @grant        GM_setValue
@@ -14,9 +14,9 @@
 // ==/UserScript==
 
 // ponytail: everything runs off one MutationObserver plus the input event
-// it's already wired to, including the wrong-answer colour hint - no need
-// to intercept the submit itself, just show amber/red/green before they
-// press Enter.
+// it's already wired to, including the wrong-answer colour hint that shows
+// amber/red/green before they press Enter. The only thing intercepted is the
+// Enter key itself, and only to make a wrong answer take a second press.
 
 (function () {
   'use strict';
@@ -39,7 +39,7 @@
   // so a toggle reloads the page to pick the new label back up.
   const TOGGLES = [
     ['hideTimer', 'Hide the timer'],
-    ['limitWrongAnswers', 'Colour the answer amber after 1 wrong, red after 2'],
+    ['limitWrongAnswers', 'Amber after 1 wrong, red after 2, double Enter to submit'],
     ['playAgainButton', 'Add a play-again button'],
   ];
   for (const [key, label] of TOGGLES) {
@@ -62,6 +62,7 @@
     if (path === lastUnitPath) return;
     lastUnitPath = path;
     currentUnitIsListening = false;
+    enterArmedValue = null;
     refreshUnitsToday();
   }
 
@@ -81,18 +82,21 @@
     true,
   );
 
+  // The end-of-unit summary shows "Your time: <b>00:00:00</b>" as plain text,
+  // no dedicated class, so match on the label text instead. Doubles as the
+  // marker for "the unit just finished".
+  function summaryTimeParagraphs() {
+    return Array.from(document.querySelectorAll('p')).filter((p) => p.textContent.trim().startsWith('Your time:'));
+  }
+
   function applyTimerVisibility() {
     const hide = settings.hideTimer;
     document.querySelectorAll('.time').forEach((el) => {
       el.style.visibility = hide ? 'hidden' : '';
     });
-    // The end-of-unit summary shows "Your time: <b>00:00:00</b>" as plain text,
-    // no dedicated class, so match on the label text instead.
-    document.querySelectorAll('p').forEach((p) => {
-      if (p.textContent.trim().startsWith('Your time:')) {
-        const b = p.querySelector('b');
-        if (b) b.style.visibility = hide ? 'hidden' : '';
-      }
+    summaryTimeParagraphs().forEach((p) => {
+      const b = p.querySelector('b');
+      if (b) b.style.visibility = hide ? 'hidden' : '';
     });
   }
 
@@ -132,18 +136,10 @@
     input._abacusHintColor = color;
   }
 
-  // After a wrong answer in a unit, colour what they're typing against the
-  // correct answer, live, so they see it before they submit. No interception
-  // of the submit itself - the site's own handling still decides what happens
-  // when they press Enter.
-  function applyWrongAnswerHint() {
-    const input = document.querySelector('input.answer-field');
-    if (!input) return;
-    if (!settings.limitWrongAnswers) {
-      setHintColor(input, '');
-      return;
-    }
-
+  // What's typed, how many they've got wrong so far, and whether the hint is
+  // live for this question. Read in one place so the colour and the Enter
+  // guard below can never disagree about it.
+  function readHintState(input) {
     // The pager pre-colours not-yet-reached questions using last attempt's
     // result, so only questions before the current one reflect this attempt.
     const pagerButtons = Array.from(document.querySelectorAll('.pager-button'));
@@ -153,11 +149,105 @@
 
     const correct = getCorrectAnswer();
     const typed = Number(input.value);
-    const isCorrect = !Number.isNaN(typed) && roundTo3(typed) === correct;
-    const shouldHint = wrongCount >= 1 && correct !== null && input.value.trim() !== '';
-    const wrongColor = wrongCount >= 2 ? 'red' : HINT_AMBER;
-    const color = shouldHint ? (isCorrect ? 'green' : wrongColor) : '';
+    return {
+      activeIndex,
+      wrongCount,
+      hasValue: input.value.trim() !== '',
+      isCorrect: !Number.isNaN(typed) && roundTo3(typed) === correct,
+      // Nothing is live until they've got one wrong, and nothing is live on a
+      // unit whose answer can't be read from the store.
+      hintsLive: wrongCount >= 1 && correct !== null,
+    };
+  }
+
+  // After a wrong answer in a unit, colour what they're typing against the
+  // correct answer, live, so they see it before they submit. The site's own
+  // handling still decides what happens once the answer is submitted.
+  function applyWrongAnswerHint() {
+    const input = document.querySelector('input.answer-field');
+    if (!input) return;
+    if (!settings.limitWrongAnswers) {
+      setHintColor(input, '');
+      return;
+    }
+
+    const state = readHintState(input);
+
+    // Forget a swallowed Enter once they move on to another question or clear
+    // the field, so the same digits typed again still get their second press.
+    if (state.activeIndex !== lastActiveIndex || !state.hasValue) enterArmedValue = null;
+    lastActiveIndex = state.activeIndex;
+
+    const shouldHint = state.hintsLive && state.hasValue;
+    const wrongColor = state.wrongCount >= 2 ? 'red' : HINT_AMBER;
+    const color = shouldHint ? (state.isCorrect ? 'green' : wrongColor) : '';
     setHintColor(input, color);
+  }
+
+  // Once the hint is live, submitting a wrong answer takes two presses of
+  // Enter: the first is swallowed and the field shakes, so a hurried press
+  // doesn't spend the attempt before they've looked at the amber or red
+  // they're typing. A correct answer, or a unit whose answer can't be read,
+  // submits on the first press exactly as before.
+  let enterArmedValue = null;
+  let lastActiveIndex = null;
+  let swallowingEnterPress = false;
+
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      if (e.key !== 'Enter' || !settings.limitWrongAnswers) return;
+      const input = document.querySelector('input.answer-field');
+      if (!input || e.target !== input) return;
+
+      const state = readHintState(input);
+      const needsSecondPress = state.hintsLive && state.hasValue && !state.isCorrect;
+      if (!needsSecondPress || enterArmedValue === input.value) {
+        swallowingEnterPress = false;
+        return;
+      }
+
+      enterArmedValue = input.value;
+      swallowingEnterPress = true;
+      e.preventDefault();
+      e.stopPropagation();
+      shakeInput(input);
+    },
+    true,
+  );
+
+  // Vue may be listening on keypress or keyup rather than keydown, and
+  // preventDefault on keydown doesn't stop either of those - so swallow the
+  // rest of the same key press too.
+  for (const type of ['keypress', 'keyup']) {
+    document.addEventListener(
+      type,
+      (e) => {
+        if (e.key !== 'Enter' || !swallowingEnterPress) return;
+        if (type === 'keyup') swallowingEnterPress = false;
+        e.preventDefault();
+        e.stopPropagation();
+      },
+      true,
+    );
+  }
+
+  const SHAKE_STYLE_ID = 'abacus-ext-shake-style';
+
+  function shakeInput(input) {
+    if (!document.getElementById(SHAKE_STYLE_ID)) {
+      const style = document.createElement('style');
+      style.id = SHAKE_STYLE_ID;
+      style.textContent =
+        '@keyframes abacus-ext-shake{10%,90%{transform:translateX(-3px)}30%,70%{transform:translateX(5px)}50%{transform:translateX(-5px)}}' +
+        '.abacus-ext-shake{animation:abacus-ext-shake 0.3s ease-in-out;}';
+      (document.head || document.documentElement).appendChild(style);
+    }
+    // Restart the animation rather than ignore a second press mid-shake.
+    input.classList.remove('abacus-ext-shake');
+    void input.offsetWidth;
+    input.classList.add('abacus-ext-shake');
+    input.addEventListener('animationend', () => input.classList.remove('abacus-ext-shake'), { once: true });
   }
 
   function trackListeningHeading() {
@@ -299,6 +389,24 @@
   // finished today, read from the same API the site's own profile page uses.
   let unitsToday = null;
 
+  // Finishing a unit doesn't change the route - the summary renders on the
+  // same URL - so the path-change refresh alone leaves a stale count sitting
+  // there for the rest of the session. Refresh when the summary appears, and
+  // poll as well so a unit finished in another tab shows up too.
+  const UNITS_POLL_MS = 60000;
+  let summaryWasVisible = false;
+
+  function watchForUnitFinish() {
+    const visible = summaryTimeParagraphs().length > 0;
+    if (visible && !summaryWasVisible) {
+      refreshUnitsToday();
+      // The server may not have counted the finish yet when the summary
+      // paints, so ask once more a moment later.
+      setTimeout(refreshUnitsToday, 2500);
+    }
+    summaryWasVisible = visible;
+  }
+
   function localDateStr(d = new Date()) {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -379,11 +487,13 @@
     applyWrongAnswerHint();
     applyPlayAgainButton();
     applySpeedMemory();
+    watchForUnitFinish();
     applyUnitsTodayDisplay();
   }
 
   applyAll();
   refreshUnitsToday();
+  setInterval(refreshUnitsToday, UNITS_POLL_MS);
 
   new MutationObserver(applyAll).observe(document.body, { childList: true, subtree: true, characterData: true });
   document.addEventListener('input', applyAll, true);
