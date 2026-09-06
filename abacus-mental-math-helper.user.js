@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Abacus Mental Math Helper
 // @namespace    https://github.com/chrisns/abacus-extension
-// @version      1.7.0
+// @version      1.8.0
 // @description  Hide the timer, colour and double-check wrong answers, remember speed settings, add a play-again button, and show units done today, on client.abacusmentalmath.com
 // @author       Chris Nesbitt-Smith
 // @match        https://client.abacusmentalmath.com/*
@@ -24,6 +24,9 @@
   const DEFAULTS = {
     hideTimer: true,
     limitWrongAnswers: true,
+    // How many wrong answers they're allowing themselves in a unit before the
+    // hints start. Set in the navbar, so it can be changed between units.
+    wrongAllowance: 1,
     playAgainButton: true,
     voiceSpeed: null,
     timeoutSpeed: null,
@@ -33,13 +36,16 @@
   for (const key of Object.keys(DEFAULTS)) {
     settings[key] = GM_getValue(key, DEFAULTS[key]);
   }
+  // A stored allowance from an older version, or a hand-edited one, still has
+  // to be a whole number the comparisons below can trust.
+  settings.wrongAllowance = clampAllowance(settings.wrongAllowance);
 
   // Toolbar popup checkboxes become Tampermonkey menu commands instead -
   // click the Tampermonkey icon to see them. Labels reflect current state,
   // so a toggle reloads the page to pick the new label back up.
   const TOGGLES = [
     ['hideTimer', 'Hide the timer'],
-    ['limitWrongAnswers', 'Amber after 1 wrong, red after 2, double Enter to submit'],
+    ['limitWrongAnswers', 'Answer hints: colour and double Enter'],
     ['playAgainButton', 'Add a play-again button'],
   ];
   for (const [key, label] of TOGGLES) {
@@ -62,7 +68,7 @@
     if (path === lastUnitPath) return;
     lastUnitPath = path;
     currentUnitIsListening = false;
-    enterArmedValue = null;
+    resetEnterGuard();
     refreshUnitsToday();
   }
 
@@ -120,9 +126,10 @@
     return Math.round(n * 1000) / 1000;
   }
 
-  // Amber is the first nudge, red the escalation: one wrong answer in a unit
-  // and a wrong entry shows amber, from the second wrong on it shows red. A
-  // correct entry is green either way.
+  // Amber is the first nudge, red the escalation: once they've used up the
+  // wrong answers they allowed themselves, a wrong entry shows amber, and
+  // every wrong answer past the allowance shows red. A correct entry is green
+  // either way.
   const HINT_AMBER = '#e69500';
 
   // A hex colour doesn't round-trip through style.color, so the guard that
@@ -142,25 +149,27 @@
   function readHintState(input) {
     // The pager pre-colours not-yet-reached questions using last attempt's
     // result, so only questions before the current one reflect this attempt.
+    // With no active question nothing counts as answered: the whole pager is
+    // pre-coloured from the last attempt, and counting it would open the hint
+    // on question 1 of a re-run before anything had been got wrong.
     const pagerButtons = Array.from(document.querySelectorAll('.pager-button'));
     const activeIndex = pagerButtons.findIndex((b) => b.classList.contains('active'));
-    const answered = activeIndex === -1 ? pagerButtons : pagerButtons.slice(0, activeIndex);
+    const answered = activeIndex === -1 ? [] : pagerButtons.slice(0, activeIndex);
     const wrongCount = answered.filter((b) => b.classList.contains('wrong')).length;
 
     const correct = getCorrectAnswer();
     const typed = Number(input.value);
     return {
-      activeIndex,
       wrongCount,
       hasValue: input.value.trim() !== '',
       isCorrect: !Number.isNaN(typed) && roundTo3(typed) === correct,
-      // Nothing is live until they've got one wrong, and nothing is live on a
-      // unit whose answer can't be read from the store.
-      hintsLive: wrongCount >= 1 && correct !== null,
+      // Nothing is live until the allowance is used up, and nothing is live on
+      // a unit whose answer can't be read from the store.
+      hintsLive: wrongCount >= settings.wrongAllowance && correct !== null,
     };
   }
 
-  // After a wrong answer in a unit, colour what they're typing against the
+  // Once the allowance is used up, colour what they're typing against the
   // correct answer, live, so they see it before they submit. The site's own
   // handling still decides what happens once the answer is submitted.
   function applyWrongAnswerHint() {
@@ -173,13 +182,11 @@
 
     const state = readHintState(input);
 
-    // Forget a swallowed Enter once they move on to another question or clear
-    // the field, so the same digits typed again still get their second press.
-    if (state.activeIndex !== lastActiveIndex || !state.hasValue) enterArmedValue = null;
-    lastActiveIndex = state.activeIndex;
+    // An empty field is a question not yet answered: nothing typed, nothing armed.
+    if (!state.hasValue) resetEnterGuard();
 
     const shouldHint = state.hintsLive && state.hasValue;
-    const wrongColor = state.wrongCount >= 2 ? 'red' : HINT_AMBER;
+    const wrongColor = state.wrongCount > settings.wrongAllowance ? 'red' : HINT_AMBER;
     const color = shouldHint ? (state.isCorrect ? 'green' : wrongColor) : '';
     setHintColor(input, color);
   }
@@ -188,26 +195,64 @@
   // Enter: the first is swallowed and the field shakes, so a hurried press
   // doesn't spend the attempt before they've looked at the amber or red
   // they're typing. A correct answer, or a unit whose answer can't be read,
-  // submits on the first press exactly as before.
-  let enterArmedValue = null;
-  let lastActiveIndex = null;
+  // submits on the first press as it always did.
+  let enterArmed = false;
+  // The site leaves the submitted answer sitting in the field afterwards, and
+  // Enter then means "on to the next question" rather than "submit this" - so
+  // the guard only applies to something typed since the last submit, or moving
+  // on would cost two presses and a shake of its own.
+  let typedSinceSubmit = false;
   let swallowingEnterPress = false;
+
+  function resetEnterGuard() {
+    enterArmed = false;
+    typedSinceSubmit = false;
+  }
+
+  document.addEventListener(
+    'input',
+    (e) => {
+      if (!e.target || !e.target.classList || !e.target.classList.contains('answer-field')) return;
+      // Freshly typed, even if it's the same digits as last time: arm again.
+      typedSinceSubmit = true;
+      enterArmed = false;
+    },
+    true,
+  );
 
   document.addEventListener(
     'keydown',
     (e) => {
-      if (e.key !== 'Enter' || !settings.limitWrongAnswers) return;
+      if (e.key !== 'Enter') return;
+
+      // Auto-repeat from a held key is the same press, so it can never be the
+      // second one - it would otherwise submit half a second into one press.
+      if (e.repeat) {
+        if (swallowingEnterPress) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      // Any fresh press clears the flag, in case the keyup that normally clears
+      // it never arrived (the window lost focus while Enter was held); a stale
+      // flag would eat the next Enter anywhere on the site.
+      swallowingEnterPress = false;
+      if (!settings.limitWrongAnswers) return;
       const input = document.querySelector('input.answer-field');
       if (!input || e.target !== input) return;
 
       const state = readHintState(input);
-      const needsSecondPress = state.hintsLive && state.hasValue && !state.isCorrect;
-      if (!needsSecondPress || enterArmedValue === input.value) {
-        swallowingEnterPress = false;
+      const needsSecondPress = typedSinceSubmit && state.hintsLive && state.hasValue && !state.isCorrect;
+      if (!needsSecondPress || enterArmed) {
+        // This press goes through, so whatever it leaves in the field is the
+        // site's now, not a typed answer waiting to be submitted.
+        resetEnterGuard();
         return;
       }
 
-      enterArmedValue = input.value;
+      enterArmed = true;
       swallowingEnterPress = true;
       e.preventDefault();
       e.stopPropagation();
@@ -414,17 +459,24 @@
     return `${y}-${m}-${day}`;
   }
 
+  // The finish-time refresh, its retry and the poll can be in flight together,
+  // and a slow earlier reply landing last would put the stale count back up -
+  // so only the newest request is allowed to write the count.
+  let unitsRequestId = 0;
+
   async function refreshUnitsToday() {
     const appEl = document.getElementById('app');
     const vm = appEl && appEl.__vue__;
     const token = vm && vm.$store && vm.$store.state.account && vm.$store.state.account.access_token;
     if (!token) return;
+    const requestId = ++unitsRequestId;
     try {
       const res = await fetch('https://api.abacusmentalmath.com/profile/units-finished/week/0', {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) return;
       const json = await res.json();
+      if (requestId !== unitsRequestId) return;
       const today = localDateStr();
       const entry = (json.data || []).find((d) => d.day === today);
       unitsToday = entry ? entry.amount : 0;
@@ -462,6 +514,77 @@
     if (display.textContent !== text) display.textContent = text;
   }
 
+  // The allowance lives in the navbar next to the logo rather than in the
+  // Tampermonkey menu, so it can be changed between units - the point is to
+  // pick a target for the next unit ("no wrong answers this time") and see the
+  // hints arrive when it's spent.
+  const ALLOWANCE_ID = 'abacus-ext-allowance';
+
+  function clampAllowance(value) {
+    const n = Math.floor(Number(value));
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.min(n, 99);
+  }
+
+  // The navbar brand is the logo; the units-today span is the fallback anchor
+  // so the box still turns up if that markup ever changes.
+  function findAllowanceAnchor() {
+    return document.querySelector('.navbar-brand') || document.getElementById('abacus-ext-units-today');
+  }
+
+  function applyAllowanceControl() {
+    const existing = document.getElementById(ALLOWANCE_ID);
+    if (!settings.limitWrongAnswers) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) {
+      // Don't overwrite what they're part-way through typing; the stored
+      // setting is what the hint reads either way.
+      const field = existing.querySelector('input');
+      const stored = String(settings.wrongAllowance);
+      if (document.activeElement !== field && field.value !== stored) field.value = stored;
+      return;
+    }
+
+    const anchor = findAllowanceAnchor();
+    if (!anchor) return;
+
+    const wrap = document.createElement('span');
+    wrap.id = ALLOWANCE_ID;
+    wrap.style.cssText =
+      'display:inline-flex;align-items:center;gap:0.4rem;font-family:poppins,sans-serif;font-weight:500;padding:0 0.75rem;white-space:nowrap;';
+
+    const label = document.createElement('label');
+    label.setAttribute('for', `${ALLOWANCE_ID}-input`);
+    label.textContent = 'Wrong answers allowed:';
+    label.style.cssText = 'margin:0;';
+
+    const field = document.createElement('input');
+    field.id = `${ALLOWANCE_ID}-input`;
+    field.type = 'number';
+    field.min = '0';
+    field.max = '99';
+    field.step = '1';
+    field.value = String(settings.wrongAllowance);
+    field.style.cssText =
+      'width:3.5rem;padding:0.1rem 0.3rem;border:1px solid #ccc;border-radius:4px;background:#fff;color:#333;font:inherit;';
+
+    field.addEventListener('input', () => {
+      settings.wrongAllowance = clampAllowance(field.value);
+      GM_setValue('wrongAllowance', settings.wrongAllowance);
+      applyWrongAnswerHint();
+    });
+    // Tidy a blank or out-of-range box up once they're done with it, rather
+    // than yanking the value around mid-keystroke.
+    field.addEventListener('blur', () => {
+      field.value = String(settings.wrongAllowance);
+    });
+
+    wrap.append(label, field);
+    anchor.insertAdjacentElement('afterend', wrap);
+  }
+
   function applyPlayAgainButton() {
     if (document.getElementById('abacus-ext-play-again')) return;
     if (!settings.playAgainButton || !currentUnitIsListening) return;
@@ -489,6 +612,7 @@
     applySpeedMemory();
     watchForUnitFinish();
     applyUnitsTodayDisplay();
+    applyAllowanceControl();
   }
 
   applyAll();
