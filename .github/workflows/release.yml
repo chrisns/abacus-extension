@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - run: node --check abacus-mental-math-helper.user.js
+
+      # Tampermonkey decides whether to offer an update from @version, so a tag
+      # that disagrees with it would ship an update nobody is offered.
+      - name: Check the tag matches @version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's|^// @version *||p' abacus-mental-math-helper.user.js | head -1 | tr -d '[:space:]')"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match @version $version in the userscript" >&2
+            exit 1
+          fi
+
+      # The annotated tag's own message becomes the release body; GitHub's
+      # generated notes are appended to it by the action below.
+      - name: Take the release notes from the tag
+        run: git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > tag-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: tag-notes.md
+          generate_release_notes: true
+          files: abacus-mental-math-helper.user.js
