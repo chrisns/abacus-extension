@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Abacus Mental Math Helper
 // @namespace    https://github.com/chrisns/abacus-extension
-// @version      1.5.0
+// @version      1.6.0
 // @description  Hide the timer, colour wrong answers, remember speed settings, add a play-again button, and show units done today, on client.abacusmentalmath.com
 // @author       Chris Nesbitt-Smith
 // @match        https://client.abacusmentalmath.com/*
@@ -15,7 +15,8 @@
 
 // ponytail: everything runs off one MutationObserver plus the input event
 // it's already wired to, including the wrong-answer colour hint - no need
-// to intercept the submit itself, just show red/green before they press Enter.
+// to intercept the submit itself, just show amber/red/green before they
+// press Enter.
 
 (function () {
   'use strict';
@@ -38,7 +39,7 @@
   // so a toggle reloads the page to pick the new label back up.
   const TOGGLES = [
     ['hideTimer', 'Hide the timer'],
-    ['limitWrongAnswers', 'Colour the answer red/green after 2 wrong'],
+    ['limitWrongAnswers', 'Colour the answer amber after 1 wrong, red after 2'],
     ['playAgainButton', 'Add a play-again button'],
   ];
   for (const [key, label] of TOGGLES) {
@@ -115,15 +116,31 @@
     return Math.round(n * 1000) / 1000;
   }
 
-  // After 2 wrong answers in a unit, colour what they're typing red/green
-  // against the correct answer, live, so they see it before they submit.
-  // No interception of the submit itself - the site's own handling still
-  // decides what happens when they press Enter.
+  // Amber is the first nudge, red the escalation: one wrong answer in a unit
+  // and a wrong entry shows amber, from the second wrong on it shows red. A
+  // correct entry is green either way.
+  const HINT_AMBER = '#e69500';
+
+  // A hex colour doesn't round-trip through style.color, so the guard that
+  // stops a write re-triggering the MutationObserver can't compare against it.
+  // Remember what was last written on the element instead - a plain property,
+  // so no DOM mutation, and it's gone if Vue swaps in a fresh input. Still
+  // re-write when the colour was cleared underneath us.
+  function setHintColor(input, color) {
+    if (input._abacusHintColor === color && (color === '' || input.style.color !== '')) return;
+    input.style.color = color;
+    input._abacusHintColor = color;
+  }
+
+  // After a wrong answer in a unit, colour what they're typing against the
+  // correct answer, live, so they see it before they submit. No interception
+  // of the submit itself - the site's own handling still decides what happens
+  // when they press Enter.
   function applyWrongAnswerHint() {
     const input = document.querySelector('input.answer-field');
     if (!input) return;
     if (!settings.limitWrongAnswers) {
-      if (input.style.color) input.style.color = '';
+      setHintColor(input, '');
       return;
     }
 
@@ -137,9 +154,10 @@
     const correct = getCorrectAnswer();
     const typed = Number(input.value);
     const isCorrect = !Number.isNaN(typed) && roundTo3(typed) === correct;
-    const shouldHint = wrongCount >= 2 && correct !== null && input.value.trim() !== '';
-    const color = shouldHint ? (isCorrect ? 'green' : 'red') : '';
-    if (input.style.color !== color) input.style.color = color;
+    const shouldHint = wrongCount >= 1 && correct !== null && input.value.trim() !== '';
+    const wrongColor = wrongCount >= 2 ? 'red' : HINT_AMBER;
+    const color = shouldHint ? (isCorrect ? 'green' : wrongColor) : '';
+    setHintColor(input, color);
   }
 
   function trackListeningHeading() {
