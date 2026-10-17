@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Abacus Mental Math Helper
 // @namespace    https://github.com/chrisns/abacus-extension
-// @version      1.8.0
+// @version      1.8.1
 // @description  Hide the timer, colour and double-check wrong answers, remember speed settings, add a play-again button, and show units done today, on client.abacusmentalmath.com
 // @author       Chris Nesbitt-Smith
 // @match        https://client.abacusmentalmath.com/*
@@ -109,17 +109,32 @@
   // The correct answer for a listening/Anzan question is the sum of
   // currentParticle.value (each entry is a signed number dictated in turn) -
   // read straight from the page's Vuex store, exposed on the #app element.
-  // Only "add" type units are supported; anything else returns null and the
-  // hint is skipped, leaving the site's own handling untouched.
+  // "add" units sum the entries and "mult" units (the times-tables
+  // assignments) multiply them, checked against past correct answers. "div"
+  // divides the first entry by the rest in turn (not seen live yet). Anything
+  // else returns null and the hint is skipped, leaving the site's own
+  // handling untouched.
   function getCorrectAnswer() {
     const appEl = document.getElementById('app');
     const vm = appEl && appEl.__vue__;
     const particles = vm && vm.$store && vm.$store.state && vm.$store.state.particles;
-    if (!particles || particles.topicOperation !== 'add') return null;
+    if (!particles) return null;
     const cp = particles.currentParticle;
-    if (!cp || !Array.isArray(cp.value)) return null;
-    const sum = cp.value.reduce((acc, v) => acc + Number(v), 0);
-    return roundTo3(sum);
+    if (!cp || !Array.isArray(cp.value) || cp.value.length === 0) return null;
+    const nums = cp.value.map(Number);
+    if (nums.some(Number.isNaN)) return null;
+    switch (particles.topicOperation) {
+      case 'add':
+        return roundTo3(nums.reduce((acc, v) => acc + v, 0));
+      case 'mult':
+        return roundTo3(nums.reduce((acc, v) => acc * v, 1));
+      case 'div': {
+        if (nums.slice(1).some((v) => v === 0)) return null;
+        return roundTo3(nums.slice(1).reduce((acc, v) => acc / v, nums[0]));
+      }
+      default:
+        return null;
+    }
   }
 
   function roundTo3(n) {
